@@ -127,19 +127,15 @@ const QString Song::kColumnSpec = Song::kColumns.join(", ");
 const QString Song::kBindSpec = Utilities::Prepend(":", Song::kColumns).join(", ");
 const QString Song::kUpdateSpec = Utilities::Updateify(Song::kColumns).join(", ");
 
-const QStringList Song::kFtsColumns = QStringList() << "ftstitle"
-                                                    << "ftsalbum"
-                                                    << "ftsartist"
-                                                    << "ftsalbumartist"
-                                                    << "ftscomposer"
-                                                    << "ftsperformer"
-                                                    << "ftsgrouping"
-                                                    << "ftsgenre"
-                                                    << "ftscomment";
-
-const QString Song::kFtsColumnSpec = Song::kFtsColumns.join(", ");
-const QString Song::kFtsBindSpec = Utilities::Prepend(":", Song::kFtsColumns).join(", ");
-const QString Song::kFtsUpdateSpec = Utilities::Updateify(Song::kFtsColumns).join(", ");
+const QStringList Song::kSearchColumns = QStringList() << "title"
+                                                       << "album"
+                                                       << "artist"
+                                                       << "albumartist"
+                                                       << "composer"
+                                                       << "performer"
+                                                       << "grouping"
+                                                       << "genre"
+                                                       << "comment";
 
 const QString Song::kManuallyUnsetCover = "(unset)";
 const QString Song::kEmbeddedCover = "(embedded)";
@@ -1344,20 +1340,6 @@ void Song::BindToQuery(SqlQuery *query) const {
   query->BindValue(":cue_path", d->cue_path_);
 
   query->BindFloatValue(":rating", d->rating_);
-
-}
-
-void Song::BindToFtsQuery(SqlQuery *query) const {
-
-  query->BindValue(":ftstitle", d->title_);
-  query->BindValue(":ftsalbum", d->album_);
-  query->BindValue(":ftsartist", d->artist_);
-  query->BindValue(":ftsalbumartist", d->albumartist_);
-  query->BindValue(":ftscomposer", d->composer_);
-  query->BindValue(":ftsperformer", d->performer_);
-  query->BindValue(":ftsgrouping", d->grouping_);
-  query->BindValue(":ftsgenre", d->genre_);
-  query->BindValue(":ftscomment", d->comment_);
 
 }
 

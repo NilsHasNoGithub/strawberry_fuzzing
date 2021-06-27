@@ -88,13 +88,12 @@ CollectionModel::CollectionModel(CollectionBackend *backend, Application *app, Q
       separate_albums_by_grouping_(false),
       artist_icon_(IconLoader::Load("folder-sound")),
       album_icon_(IconLoader::Load("cdcase")),
+      init_id_(-1),
+      next_init_id_(0),
       init_task_id_(-1),
       use_pretty_covers_(true),
       show_dividers_(true),
-      use_disk_cache_(false),
-      use_lazy_loading_(true) {
-
-  root_->lazy_loaded = true;
+      use_disk_cache_(false) {
 
   group_by_[0] = GroupBy_AlbumArtist;
   group_by_[1] = GroupBy_AlbumDisc;
@@ -122,6 +121,7 @@ CollectionModel::CollectionModel(CollectionBackend *backend, Application *app, Q
     QObject::connect(app_, &Application::ClearPixmapDiskCache, this, &CollectionModel::ClearDiskCache);
   }
 
+  QObject::connect(backend_, &CollectionBackend::GotSongs, this, &CollectionModel::ResetAsyncFinished);
   QObject::connect(backend_, &CollectionBackend::SongsDiscovered, this, &CollectionModel::SongsDiscovered);
   QObject::connect(backend_, &CollectionBackend::SongsDeleted, this, &CollectionModel::SongsDeleted);
   QObject::connect(backend_, &CollectionBackend::DatabaseReset, this, &CollectionModel::Reset);
@@ -182,26 +182,21 @@ void CollectionModel::ReloadSettings() {
 
 }
 
-void CollectionModel::Init(const bool async) {
+void CollectionModel::Init() {
 
-  if (async) {
-    // Show a loading indicator in the model.
-    CollectionItem *loading = new CollectionItem(CollectionItem::Type_LoadingIndicator, root_);
-    loading->display_text = tr("Loading...");
-    loading->lazy_loaded = true;
-    beginResetModel();
-    endResetModel();
+  init_id_ = ++next_init_id_;
+  BeginReset();
+  // Show a loading indicator in the model.
+  CollectionItem *loading = new CollectionItem(CollectionItem::Type_LoadingIndicator, root_);
+  loading->display_text = tr("Loading...");
+  endResetModel();
 
-    // Show a loading indicator in the status bar too.
-    if (app_) {
-      init_task_id_ = app_->task_manager()->StartTask(tr("Loading songs"));
-    }
-
-    ResetAsync();
+  // Show a loading indicator in the status bar too.
+  if (app_ && init_task_id_ == -1) {
+    init_task_id_ = app_->task_manager()->StartTask(tr("Loading songs"));
   }
-  else {
-    Reset();
-  }
+
+  ResetAsync();
 
 }
 
@@ -252,10 +247,7 @@ void CollectionModel::SongsDiscovered(const SongList &songs) {
 
       }
 
-      // If we just created the damn thing then we don't need to continue into it any further because it'll get lazy-loaded properly later.
-      if (!container->lazy_loaded && use_lazy_loading_) break;
     }
-    if (!container->lazy_loaded && use_lazy_loading_) continue;
 
     // We've gone all the way down to the deepest level and everything was already lazy loaded, so now we have to create the song in the container.
     song_nodes_.insert(song.id(), ItemFromSong(GroupBy_None, separate_albums_by_grouping_, true, false, container, song, -1));
@@ -519,13 +511,6 @@ void CollectionModel::SongsDeleted(const SongList &songs) {
       endRemoveRows();
 
     }
-    else {
-      // If we get here it means some of the songs we want to delete haven't been lazy-loaded yet.
-      // This is bad, because it would mean that to clean up empty parents we would need to lazy-load them all individually to see if they're empty.
-      // This can take a very long time, so better to just reset the model and be done with it.
-      Reset();
-      return;
-    }
   }
 
   // Now delete empty parents
@@ -771,10 +756,6 @@ QVariant CollectionModel::data(const CollectionItem *item, const int role) const
       return item->metadata.artist();
 
     case Role_Editable:{
-      if (!item->lazy_loaded) {
-        const_cast<CollectionModel*>(this)->LazyPopulate(const_cast<CollectionItem*>(item), true);
-      }
-
       if (item->type == CollectionItem::Type_Container) {
         // If we have even one non editable item as a child, we ourselves are not available for edit
         if (item->children.isEmpty()) {
@@ -807,7 +788,7 @@ QVariant CollectionModel::data(const CollectionItem *item, const int role) const
 
 bool CollectionModel::HasCompilations(const QSqlDatabase &db, const CollectionQuery &query) {
 
-  CollectionQuery q(db, backend_->songs_table(), backend_->fts_table(), query_options_);
+  CollectionQuery q(db, backend_->songs_table(), query_options_);
 
   q.SetColumnSpec(query.column_spec());
   q.SetOrderBy(query.order_by());
@@ -827,42 +808,15 @@ bool CollectionModel::HasCompilations(const QSqlDatabase &db, const CollectionQu
 
 }
 
-CollectionModel::QueryResult CollectionModel::RunQuery(CollectionItem *parent) {
+CollectionModel::QueryResult CollectionModel::RunQuery() {
 
   QueryResult result;
-
-  // Information about what we want the children to be
-  int child_level = parent == root_ ? 0 : parent->container_level + 1;
-  GroupBy child_group_by = child_level >= 3 ? GroupBy_None : group_by_[child_level];
-
-  // Initialize the query.  child_group_by says what type of thing we want (artists, songs, etc.)
 
   {
     QMutexLocker l(backend_->db()->Mutex());
     QSqlDatabase db(backend_->db()->Connect());
-
-    CollectionQuery q(db, backend_->songs_table(), backend_->fts_table(), query_options_);
-    InitQuery(child_group_by, separate_albums_by_grouping_, &q);
-
-    // Walk up through the item's parents adding filters as necessary
-    CollectionItem *p = parent;
-    while (p && p->type == CollectionItem::Type_Container) {
-      FilterQuery(group_by_[p->container_level], separate_albums_by_grouping_, p, &q);
-      p = p->parent;
-    }
-
-    // Artists GroupBy is special - we don't want compilation albums appearing
-    if (IsArtistGroupBy(child_group_by)) {
-      // Add the special Various artists node
-      if (show_various_artists_ && HasCompilations(db, q)) {
-        result.create_va = true;
-      }
-
-      // Don't show compilations again outside the Various artists node
-      q.AddCompilationRequirement(false);
-    }
-
-    // Execute the query
+    CollectionQuery q(db, backend_->songs_table(), query_options_);
+    q.SetColumnSpec("%songs_table.ROWID, " + Song::kColumnSpec);
     if (q.Exec()) {
       while (q.Next()) {
         result.rows << SqlRow(q);
@@ -871,7 +825,6 @@ CollectionModel::QueryResult CollectionModel::RunQuery(CollectionItem *parent) {
     else {
       backend_->ReportErrors(q);
     }
-
   }
 
   if (QThread::currentThread() != thread() && QThread::currentThread() != backend_->thread()) {
@@ -882,52 +835,86 @@ CollectionModel::QueryResult CollectionModel::RunQuery(CollectionItem *parent) {
 
 }
 
-void CollectionModel::PostQuery(CollectionItem *parent, const CollectionModel::QueryResult &result, const bool signal) {
-
-  // Information about what we want the children to be
-  int child_level = parent == root_ ? 0 : parent->container_level + 1;
-  GroupBy child_group_by = child_level >= 3 ? GroupBy_None : group_by_[child_level];
-
-  if (result.create_va && parent->compilation_artist_node_ == nullptr) {
-    CreateCompilationArtistNode(signal, parent);
-  }
+void CollectionModel::PostQuery(const CollectionModel::QueryResult &result) {
 
   // Step through the results
   for (const SqlRow &row : result.rows) {
-    // Create the item - it will get inserted into the model here
-    CollectionItem *item = ItemFromQuery(child_group_by, separate_albums_by_grouping_, signal, child_level == 0, parent, row, child_level);
 
-    // Save a pointer to it for later
-    if (child_group_by == GroupBy_None) {
-      song_nodes_.insert(item->metadata.id(), item);
+    Song song;
+    song.InitFromQuery(row, true);
+
+    // Sanity check to make sure we don't add songs that are outside the user's filter
+    if (!query_options_.Matches(song)) continue;
+
+    // Hey, we've already got that one!
+    if (song_nodes_.contains(song.id())) continue;
+
+    // Before we can add each song we need to make sure the required container items already exist in the tree.
+    // These depend on which "group by" settings the user has on the collection.
+    // Eg. if the user grouped by artist and album, we would need to make sure nodes for the song's artist and album were already in the tree.
+
+    // Find parent containers in the tree
+    CollectionItem *container = root_;
+    QString key;
+    for (int i = 0; i < 3; ++i) {
+      GroupBy type = group_by_[i];
+      if (type == GroupBy_None) break;
+
+      if (!key.isEmpty()) key.append("-");
+
+      // Special case: if the song is a compilation and the current GroupBy level is Artists, then we want the Various Artists node :(
+      if (IsArtistGroupBy(type) && song.is_compilation()) {
+        if (container->compilation_artist_node_ == nullptr) {
+          CreateCompilationArtistNode(false, container);
+        }
+        container = container->compilation_artist_node_;
+        key = container->key;
+      }
+      else {
+        // Otherwise find the proper container at this level based on the item's key
+        key.append(ContainerKey(type, song));
+
+        // Does it exist already?
+        if (!container_nodes_[i].contains(key)) {
+          // Create the container
+          container_nodes_[i].insert(key, ItemFromSong(type, false, i == 0, container, song, i));
+        }
+        container = container_nodes_[i][key];
+      }
+
     }
-    else {
-      container_nodes_[child_level].insert(item->key, item);
-    }
+    song_nodes_.insert(song.id(), ItemFromSong(GroupBy_None, false, false, container, song, -1));
   }
-
-}
-
-void CollectionModel::LazyPopulate(CollectionItem *parent, const bool signal) {
-
-  if (parent->lazy_loaded) return;
-  parent->lazy_loaded = true;
-
-  QueryResult result = RunQuery(parent);
-  PostQuery(parent, result, signal);
 
 }
 
 void CollectionModel::ResetAsync() {
 
 #if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
-  QFuture<CollectionModel::QueryResult> future = QtConcurrent::run(&CollectionModel::RunQuery, this, root_);
+  QFuture<CollectionModel::QueryResult> future = QtConcurrent::run(&CollectionModel::RunQuery, this);
 #else
-  QFuture<CollectionModel::QueryResult> future = QtConcurrent::run(this, &CollectionModel::RunQuery, root_);
+  QFuture<CollectionModel::QueryResult> future = QtConcurrent::run(this, &CollectionModel::RunQuery);
 #endif
   QFutureWatcher<CollectionModel::QueryResult> *watcher = new QFutureWatcher<CollectionModel::QueryResult>();
   QObject::connect(watcher, &QFutureWatcher<CollectionModel::QueryResult>::finished, this, &CollectionModel::ResetAsyncQueryFinished);
   watcher->setFuture(future);
+
+}
+
+void CollectionModel::ResetAsyncFinished(const SongList &songs, const int id) {
+
+  if (id != init_id_) return;
+
+  BeginReset();
+  endResetModel();
+  SongsDiscovered(songs);
+
+  if (init_task_id_ != -1) {
+    if (app_) {
+      app_->task_manager()->SetTaskFinished(init_task_id_);
+    }
+    init_task_id_ = -1;
+  }
 
 }
 
@@ -942,9 +929,8 @@ void CollectionModel::ResetAsyncQueryFinished() {
   }
 
   BeginReset();
-  root_->lazy_loaded = true;
 
-  PostQuery(root_, result, false);
+  PostQuery(result);
 
   if (init_task_id_ != -1) {
     if (app_) {
@@ -971,21 +957,17 @@ void CollectionModel::BeginReset() {
 
   root_ = new CollectionItem(this);
   root_->compilation_artist_node_ = nullptr;
-  root_->lazy_loaded = false;
 
 }
 
 void CollectionModel::Reset() {
 
   BeginReset();
-
-  // Populate top level
-  LazyPopulate(root_, false);
-
   endResetModel();
 
 }
 
+<<<<<<< HEAD
 void CollectionModel::InitQuery(const GroupBy group_by, const bool separate_albums_by_grouping, CollectionQuery *q) {
 
   // Say what group_by of thing we want to get back from the database.
@@ -1190,7 +1172,9 @@ CollectionItem *CollectionModel::InitItem(const GroupBy group_by, const bool sig
 
   CollectionItem::Type item_type = group_by == GroupBy_None ? CollectionItem::Type_Song : CollectionItem::Type_Container;
 
-  if (signal) beginInsertRows(ItemToIndex(parent), static_cast<int>(parent->children.count()), static_cast<int>(parent->children.count()));
+  if (signal) {
+    beginInsertRows(ItemToIndex(parent), static_cast<int>(parent->children.count()), static_cast<int>(parent->children.count()));
+  }
 
   // Initialize the item depending on what type it's meant to be
   CollectionItem *item = new CollectionItem(item_type, parent);
@@ -1595,15 +1579,12 @@ CollectionItem *CollectionModel::ItemFromSong(const GroupBy group_by, const bool
   }
 
   FinishItem(group_by, signal, create_divider, parent, item);
-  if (s.url().scheme() == "cdda") item->lazy_loaded = true;
 
   return item;
 
 }
 
 void CollectionModel::FinishItem(const GroupBy group_by, const bool signal, const bool create_divider, CollectionItem *parent, CollectionItem *item) {
-
-  if (group_by == GroupBy_None) item->lazy_loaded = true;
 
   if (signal) {
     endInsertRows();
@@ -1625,7 +1606,6 @@ void CollectionModel::FinishItem(const GroupBy group_by, const bool signal, cons
       divider->key = divider_key;
       divider->display_text = DividerDisplayText(group_by, divider_key);
       divider->sort_text = divider_key + "  ";
-      divider->lazy_loaded = true;
 
       divider_nodes_[divider_key] = divider;
 
@@ -1809,8 +1789,6 @@ void CollectionModel::GetChildSongs(CollectionItem *item, QList<QUrl> *urls, Son
 
   switch (item->type) {
     case CollectionItem::Type_Container: {
-      const_cast<CollectionModel*>(this)->LazyPopulate(item);
-
       QList<CollectionItem*> children = item->children;
       std::sort(children.begin(), children.end(), std::bind(&CollectionModel::CompareItems, this, std::placeholders::_1, std::placeholders::_2));
 
@@ -1852,28 +1830,18 @@ SongList CollectionModel::GetChildSongs(const QModelIndex &idx) const {
 }
 
 void CollectionModel::SetFilterAge(const int age) {
-  query_options_.set_max_age(age);
-  ResetAsync();
-}
 
-void CollectionModel::SetFilterText(const QString &text) {
-  query_options_.set_filter(text);
-  ResetAsync();
+  query_options_.set_max_age(age);
+
+  Init();
 
 }
 
 void CollectionModel::SetFilterQueryMode(QueryOptions::QueryMode query_mode) {
+
   query_options_.set_query_mode(query_mode);
-  ResetAsync();
 
-}
-
-bool CollectionModel::canFetchMore(const QModelIndex &parent) const {
-
-  if (!parent.isValid()) return false;
-
-  CollectionItem *item = IndexToItem(parent);
-  return !item->lazy_loaded;
+  Init();
 
 }
 
@@ -1884,7 +1852,8 @@ void CollectionModel::SetGroupBy(const Grouping g, const std::optional<bool> sep
     separate_albums_by_grouping_ = separate_albums_by_grouping.value();
   }
 
-  ResetAsync();
+  Init();
+
   emit GroupingChanged(g, separate_albums_by_grouping_);
 
 }
@@ -1945,7 +1914,6 @@ void CollectionModel::ClearDiskCache() {
 void CollectionModel::ExpandAll(CollectionItem *item) const {
 
   if (!item) item = root_;
-  const_cast<CollectionModel*>(this)->LazyPopulate(const_cast<CollectionItem*>(item), false);
   for (CollectionItem *child : item->children) {
     ExpandAll(child);
   }

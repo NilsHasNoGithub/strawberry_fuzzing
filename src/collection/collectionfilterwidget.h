@@ -42,6 +42,7 @@ class QKeyEvent;
 
 class GroupByDialog;
 class SavedGroupingManager;
+class CollectionFilter;
 class Ui_CollectionFilterWidget;
 
 class CollectionFilterWidget : public QWidget {
@@ -59,7 +60,9 @@ class CollectionFilterWidget : public QWidget {
     AlwaysDelayed,
   };
 
-  void Init(CollectionModel *model);
+  void Init(CollectionModel *model, CollectionFilter *filter);
+
+  void setFilter(CollectionFilter *filter);
 
   static QActionGroup *CreateGroupByActions(const QString &saved_groupings_settings_group, QObject *parent);
 
@@ -95,7 +98,6 @@ class CollectionFilterWidget : public QWidget {
   void UpPressed();
   void DownPressed();
   void ReturnPressed();
-  void Filter(QString text);
 
  protected:
   void keyReleaseEvent(QKeyEvent *e) override;
@@ -116,6 +118,7 @@ class CollectionFilterWidget : public QWidget {
  private:
   Ui_CollectionFilterWidget *ui_;
   CollectionModel *model_;
+  CollectionFilter *filter_;
 
   GroupByDialog *group_by_dialog_;
   SavedGroupingManager *groupings_manager_;
