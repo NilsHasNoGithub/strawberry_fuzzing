@@ -108,6 +108,12 @@
 
 int main(int argc, char *argv[]) {
 
+  // spawn thread which kills program after 3 seconds for fuzzing
+  std::thread([]() {
+    std::this_thread::sleep_for(std::chrono::seconds(3));
+    std::exit(0);
+  }).detach();
+
 #ifdef Q_OS_MACOS
   // Do Mac specific startup to get media keys working.
   // This must go before QApplication initialization.
