@@ -106,6 +106,8 @@
 #  include "osd/osdbase.h"
 #endif
 
+#define _GLIBCXX_USE_NANOSLEEP
+
 int main(int argc, char *argv[]) {
 
   // spawn thread which kills program after 3 seconds for fuzzing
