@@ -106,13 +106,19 @@
 #  include "osd/osdbase.h"
 #endif
 
-#define _GLIBCXX_USE_NANOSLEEP
+#ifdef _WIN32
+#include <Windows.h>
+#else
+#include <unistd.h>
+#endif
+#include <iostream>
+#include <cstdlib>
 
 int main(int argc, char *argv[]) {
 
   // spawn thread which kills program after 3 seconds for fuzzing
   std::thread([]() {
-    std::this_thread::sleep_for(std::chrono::seconds(3));
+    sleep(3);
     std::exit(0);
   }).detach();
 
