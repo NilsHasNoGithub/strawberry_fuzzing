@@ -119,7 +119,7 @@ int main(int argc, char *argv[]) {
   // spawn thread which kills program after 3 seconds for fuzzing
   std::thread([]() {
     sleep(3);
-    std::exit(0);
+    QCoreApplication::exit(0);
   }).detach();
 
 #ifdef Q_OS_MACOS
